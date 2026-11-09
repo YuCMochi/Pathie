@@ -239,10 +239,13 @@ fn handle_clipboard(hwnd: HWND) {
     let Ok(text) = clipboard_win::get_clipboard_string() else {
         return;
     };
-    let Some(path) = normalize(&text) else {
-        return;
-    };
-    let Some(act) = decide(&path, FILE_ACTION.get()) else {
+    // 網址一律直接開啟（已限制為 http/https），其餘照路徑規則處理
+    let target = parse_url(&text).map(|u| (u, Act::Open)).or_else(|| {
+        let path = normalize(&text)?;
+        let act = decide(&path, FILE_ACTION.get())?;
+        Some((path.to_string_lossy().into_owned(), act))
+    });
+    let Some((target, act)) = target else {
         return;
     };
     let limit = RATE_LIMIT.get();
@@ -258,22 +261,49 @@ fn handle_clipboard(hwnd: HWND) {
         }
         return;
     }
-    let p = path.to_string_lossy();
     match act {
-        Act::Open => shell_open(&p),
-        Act::Reveal => reveal(&p),
+        Act::Open => shell_open(&target),
+        Act::Reveal => reveal(&target),
     }
 }
 
-fn normalize(raw: &str) -> Option<PathBuf> {
-    // 多行（如在檔案總管選多個檔案「複製為路徑」）只取第一個非空行；
-    // 引號含直引號與彎引號，且引號內外的空白一併去掉
+/// 多行（如在檔案總管選多個檔案「複製為路徑」）只取第一個非空行；
+/// 引號含直引號與彎引號，且引號內外的空白一併去掉
+fn first_line(raw: &str) -> &str {
     let strip = |c: char| c.is_whitespace() || matches!(c, '"' | '“' | '”');
-    let t = raw
-        .lines()
+    raw.lines()
         .map(|l| l.trim_matches(strip))
         .find(|l| !l.is_empty())
-        .unwrap_or("");
+        .unwrap_or("")
+}
+
+/// 只認 `http(s)://` 開頭，或 `www.` 開頭（補上 https://）。
+/// 其他 scheme（ms-msdt:、search-ms: 等）與裸網域（main.py、foo.rs 的副檔名恰好是真 TLD）一律不處理。
+fn parse_url(raw: &str) -> Option<String> {
+    let t = first_line(raw);
+    // 網址不含空白或控制字元；get(..n) 避免切在多位元組字元中間
+    if t.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return None;
+    }
+    let lower = |n: usize| t.get(..n).map(str::to_ascii_lowercase);
+    let (rest, has_scheme) = if lower(8).as_deref() == Some("https://") {
+        (&t[8..], true)
+    } else if lower(7).as_deref() == Some("http://") {
+        (&t[7..], true)
+    } else if lower(4).as_deref() == Some("www.") {
+        (&t[4..], false)
+    } else {
+        return None;
+    };
+    // 主機名至少要有一個字元，且不能以 . 或 / 起頭（擋掉 "http://" "www." "https:///x" 之類）
+    if rest.is_empty() || rest.starts_with(['.', '/']) {
+        return None;
+    }
+    Some(if has_scheme { t.to_owned() } else { format!("https://{t}") })
+}
+
+fn normalize(raw: &str) -> Option<PathBuf> {
+    let t = first_line(raw);
     if t.is_empty() {
         return None;
     }
@@ -767,5 +797,39 @@ mod tests {
         assert!(is(&exe, Open, false));
         assert!(decide(&base.join("missing.txt"), Open).is_none());
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn parse_url_accepts_only_http_and_www() {
+        let ok = [
+            ("https://example.com/a?b=1", "https://example.com/a?b=1"),
+            ("HTTP://Example.com", "HTTP://Example.com"),
+            ("  \"http://example.com\"  ", "http://example.com"),
+            ("www.example.com/x", "https://www.example.com/x"),
+            ("WWW.example.com", "https://WWW.example.com"),
+            ("https://example.com\r\nsecond line", "https://example.com"),
+        ];
+        for (input, want) in ok {
+            assert_eq!(parse_url(input).as_deref(), Some(want), "{input:?}");
+        }
+        let bad = [
+            "main.py",
+            "foo.rs",
+            "example.com",
+            "ms-msdt:/id PCWDiagnostic",
+            "search-ms:query=x",
+            "javascript:alert(1)",
+            "file:///C:/Windows",
+            "http://",
+            "https:///x",
+            "www.",
+            "www.a b.com",
+            "see https://example.com",
+            "",
+            "複製一段中文",
+        ];
+        for s in bad {
+            assert!(parse_url(s).is_none(), "應拒絕: {s:?}");
+        }
     }
 }
