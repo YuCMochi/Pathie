@@ -32,9 +32,9 @@ const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 const RUN_VALUE: &str = "Pathie";
 // 開機自動啟動時帶的參數，用來跳過「已啟動」通知
 const AUTOSTART_ARG: &str = "--autostart";
-// 「僅開啟資料夾」開關的存放位置（DWORD，缺值視為開啟）
+// 「檔案行為」的存放位置（DWORD：0 不處理／1 選取／2 直接開啟，缺值視為 1）
 const SETTINGS_KEY: &str = r"Software\Pathie";
-const FOLDERS_ONLY_VALUE: &str = "FoldersOnly";
+const FILE_ACTION_VALUE: &str = "FileAction";
 // 防濫用：每分鐘最多自動開啟幾次，超過就自動暫停監控並通知
 const RATE_LIMIT_VALUE: &str = "RateLimitPerMinute";
 const RATE_WINDOW: Duration = Duration::from_secs(60);
@@ -52,9 +52,10 @@ const ID_STARTUP: usize = 1;
 const ID_TOGGLE: usize = 2;
 const ID_EXIT: usize = 3;
 const ID_ABOUT: usize = 4;
-const ID_FOLDERS_ONLY: usize = 5;
 // 頻率上限子選單：ID_RATE_BASE + RATE_OPTIONS 的索引
 const ID_RATE_BASE: usize = 100;
+// 檔案行為子選單：ID_FILE_BASE + FileAction 的值
+const ID_FILE_BASE: usize = 200;
 
 // 對應 app.rc 的資源 ID
 const IDI_ON: u16 = 2;
@@ -62,7 +63,7 @@ const IDI_OFF: u16 = 3;
 
 thread_local! {
     static MONITORING: Cell<bool> = const { Cell::new(true) };
-    static FOLDERS_ONLY: Cell<bool> = const { Cell::new(true) };
+    static FILE_ACTION: Cell<FileAction> = const { Cell::new(FileAction::Reveal) };
     static RATE_LIMIT: Cell<u32> = const { Cell::new(RATE_DEFAULT) };
     // 最近 RATE_WINDOW 內每次自動開啟的時間點
     static OPENS: RefCell<VecDeque<Instant>> = const { RefCell::new(VecDeque::new()) };
@@ -117,7 +118,7 @@ fn main() {
         ICON_OFF.set(load_icon(hinst, IDI_OFF, cx, cy));
 
         WM_TASKBAR_CREATED.set(RegisterWindowMessageW(w!("TaskbarCreated")));
-        FOLDERS_ONLY.set(load_folders_only());
+        FILE_ACTION.set(load_file_action());
         RATE_LIMIT.set(load_rate_limit());
         let _ = AddClipboardFormatListener(hwnd);
         tray_add(hwnd);
@@ -164,10 +165,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             match (wp.0 & 0xFFFF) as usize {
                 ID_STARTUP => set_startup(!is_startup_enabled()),
                 ID_TOGGLE => toggle_monitoring(hwnd),
-                ID_FOLDERS_ONLY => {
-                    let on = !FOLDERS_ONLY.get();
-                    FOLDERS_ONLY.set(on);
-                    save_folders_only(on);
+                id @ ID_FILE_BASE.. => {
+                    if let Some(a) = FileAction::from_u32((id - ID_FILE_BASE) as u32) {
+                        FILE_ACTION.set(a);
+                        save_file_action(a);
+                    }
                 }
                 id @ ID_RATE_BASE.. => {
                     if let Some(&n) = RATE_OPTIONS.get(id - ID_RATE_BASE) {
@@ -236,9 +238,9 @@ fn handle_clipboard(hwnd: HWND) {
     let Some(path) = normalize(&text) else {
         return;
     };
-    if !is_valid(&path, FOLDERS_ONLY.get()) {
+    let Some(act) = decide(&path, FILE_ACTION.get()) else {
         return;
-    }
+    };
     let limit = RATE_LIMIT.get();
     if OPENS.with_borrow_mut(|o| rate_exceeded(o, Instant::now(), limit)) {
         // 自動暫停而非只丟棄：洪水持續時每次都通知本身就是干擾
@@ -252,7 +254,11 @@ fn handle_clipboard(hwnd: HWND) {
         }
         return;
     }
-    shell_open(&path.to_string_lossy());
+    let p = path.to_string_lossy();
+    match act {
+        Act::Open => shell_open(&p),
+        Act::Reveal => reveal(&p),
+    }
 }
 
 fn normalize(raw: &str) -> Option<PathBuf> {
@@ -281,25 +287,83 @@ fn normalize(raw: &str) -> Option<PathBuf> {
     (!t.is_empty()).then(|| PathBuf::from(t))
 }
 
-fn is_valid(p: &Path, folders_only: bool) -> bool {
-    // 只接受絕對路徑，避免裸檔名（如 gpedit.msc）靠工作目錄湊巧命中系統指令。
-    // Rust 的 is_absolute 比 C# 的 Path.IsPathRooted 更嚴格，連 `\Windows\...`
-    // 和 `C:foo` 這種「有 root 但非絕對」的寫法也一併擋掉。
-    //
-    // folders_only：看檔案系統實際狀態（is_dir）而非副檔名——資料夾可以叫 v1.2，
-    // 檔案可以叫 LICENSE。檔案（含 .exe/.lnk）一律不開，避免繞過 Windows 的執行警告。
-    p.is_absolute() && if folders_only { p.is_dir() } else { p.exists() }
+/// 使用者對「檔案」（非資料夾）的處理方式。資料夾一律直接開啟。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum FileAction {
+    Ignore = 0,
+    Reveal = 1,
+    Open = 2,
+}
+
+impl FileAction {
+    fn from_u32(n: u32) -> Option<Self> {
+        match n {
+            0 => Some(Self::Ignore),
+            1 => Some(Self::Reveal),
+            2 => Some(Self::Open),
+            _ => None,
+        }
+    }
+}
+
+enum Act {
+    Open,
+    Reveal,
+}
+
+/// 這些副檔名直接開啟等於執行程式碼，ShellExecute 對本機檔案又不會跳警告，
+/// 所以即使使用者選「直接開啟」也一律退回「選取」。
+// ponytail: 黑名單會漏（如新的腳本類型），改白名單若誤擋太多再說
+const DANGEROUS_EXTS: &[&str] = &[
+    "exe", "bat", "cmd", "com", "scr", "msi", "msp", "ps1", "vbs", "vbe", "js", "jse", "wsf",
+    "wsh", "hta", "lnk", "url", "reg", "cpl", "jar", "dll", "pif", "gadget", "appref-ms",
+];
+
+fn is_dangerous(p: &Path) -> bool {
+    p.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| DANGEROUS_EXTS.iter().any(|d| e.eq_ignore_ascii_case(d)))
+}
+
+/// 決定要對這個路徑做什麼；None 表示不處理。
+///
+/// 只接受絕對路徑，避免裸檔名（如 gpedit.msc）靠工作目錄湊巧命中系統指令。
+/// Rust 的 is_absolute 比 C# 的 Path.IsPathRooted 更嚴格，連 `\Windows\...`
+/// 和 `C:foo` 這種「有 root 但非絕對」的寫法也一併擋掉。
+/// 資料夾/檔案看檔案系統實際狀態（is_dir）而非副檔名——資料夾可以叫 v1.2。
+fn decide(p: &Path, files: FileAction) -> Option<Act> {
+    if !p.is_absolute() || !p.exists() {
+        return None;
+    }
+    if p.is_dir() {
+        return Some(Act::Open);
+    }
+    match files {
+        FileAction::Ignore => None,
+        FileAction::Open if !is_dangerous(p) => Some(Act::Open),
+        _ => Some(Act::Reveal),
+    }
+}
+
+/// 在檔案總管開啟所在資料夾並選取該檔案
+fn reveal(path: &str) {
+    shell_execute("explorer.exe", Some(&format!("/select,\"{path}\"")));
 }
 
 /// 用預設程式開啟路徑或網址（等同在檔案總管雙擊）
 fn shell_open(target: &str) {
-    let wide: Vec<u16> = target.encode_utf16().chain(Some(0)).collect();
+    shell_execute(target, None);
+}
+
+fn shell_execute(target: &str, params: Option<&str>) {
+    let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(Some(0)).collect() };
+    let (t, p) = (wide(target), params.map(wide));
     unsafe {
         ShellExecuteW(
             HWND::default(),
             PCWSTR::null(),
-            PCWSTR(wide.as_ptr()),
-            PCWSTR::null(),
+            PCWSTR(t.as_ptr()),
+            p.as_ref().map_or(PCWSTR::null(), |p| PCWSTR(p.as_ptr())),
             PCWSTR::null(),
             SW_SHOWNORMAL,
         );
@@ -425,12 +489,18 @@ unsafe fn show_menu(hwnd: HWND) {
         w!("恢復監控")
     };
     let _ = AppendMenuW(menu, MF_STRING, ID_TOGGLE, toggle);
-    let folders = if FOLDERS_ONLY.get() {
-        MF_CHECKED
-    } else {
-        MF_UNCHECKED
-    };
-    let _ = AppendMenuW(menu, MF_STRING | folders, ID_FOLDERS_ONLY, w!("僅開啟資料夾"));
+    if let Ok(sub) = CreatePopupMenu() {
+        let cur = FILE_ACTION.get();
+        for (a, label) in [
+            (FileAction::Ignore, w!("不處理")),
+            (FileAction::Reveal, w!("在資料夾中選取")),
+            (FileAction::Open, w!("直接開啟（執行檔除外）")),
+        ] {
+            let check = if a == cur { MF_CHECKED } else { MF_UNCHECKED };
+            let _ = AppendMenuW(sub, MF_STRING | check, ID_FILE_BASE + a as usize, label);
+        }
+        let _ = AppendMenuW(menu, MF_POPUP, sub.0 as usize, w!("複製檔案時"));
+    }
     if let Ok(sub) = CreatePopupMenu() {
         let cur = RATE_LIMIT.get();
         for (i, n) in RATE_OPTIONS.iter().enumerate() {
@@ -517,16 +587,18 @@ fn set_startup(enable: bool) {
     }
 }
 
-fn load_folders_only() -> bool {
+fn load_file_action() -> FileAction {
     RegKey::predef(HKEY_CURRENT_USER)
         .open_subkey(SETTINGS_KEY)
-        .and_then(|k| k.get_value::<u32, _>(FOLDERS_ONLY_VALUE))
-        .map_or(true, |v| v != 0)
+        .and_then(|k| k.get_value::<u32, _>(FILE_ACTION_VALUE))
+        .ok()
+        .and_then(FileAction::from_u32)
+        .unwrap_or(FileAction::Reveal)
 }
 
-fn save_folders_only(on: bool) {
+fn save_file_action(a: FileAction) {
     if let Ok((key, _)) = RegKey::predef(HKEY_CURRENT_USER).create_subkey(SETTINGS_KEY) {
-        let _ = key.set_value(FOLDERS_ONLY_VALUE, &u32::from(on));
+        let _ = key.set_value(FILE_ACTION_VALUE, &(a as u32));
     }
 }
 
@@ -577,7 +649,7 @@ mod tests {
             "C:notrooted",
         ];
         for s in cases {
-            let rejected = normalize(s).map_or(true, |p| !is_valid(&p, false));
+            let rejected = normalize(s).map_or(true, |p| decide(&p, FileAction::Open).is_none());
             assert!(rejected, "應拒絕: {s:?}");
         }
     }
@@ -609,7 +681,7 @@ mod tests {
         ];
         for f in &forms {
             let p = normalize(f).unwrap_or_else(|| panic!("normalize 回傳 None: {f:?}"));
-            assert!(is_valid(&p, false), "應接受: {f:?} -> {p:?}");
+            assert!(decide(&p, FileAction::Reveal).is_some(), "應接受: {f:?} -> {p:?}");
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -646,25 +718,38 @@ mod tests {
     fn expands_environment_variables() {
         let p = normalize("%TEMP%").expect("%TEMP% 應正規化成功");
         assert!(!p.to_string_lossy().contains('%'), "未展開: {p:?}");
-        assert!(is_valid(&p, false), "%TEMP% 應展開成有效路徑: {p:?}");
+        assert!(decide(&p, FileAction::Reveal).is_some(), "%TEMP% 應展開成有效路徑: {p:?}");
     }
 
     #[test]
-    fn folders_only_blocks_files_by_real_type_not_extension() {
-        let base = std::env::temp_dir().join("clipboard_rs_folders_only");
+    fn file_action_decides_by_real_type_and_blocks_dangerous_ext() {
+        use FileAction::*;
+        let base = std::env::temp_dir().join("clipboard_rs_file_action");
         let dotted = base.join("v1.2"); // 資料夾但有「副檔名」
-        let exe = base.join("a.exe");
+        let exe = base.join("a.EXE");
+        let doc = base.join("a.txt");
         let bare = base.join("LICENSE"); // 檔案但沒副檔名
         std::fs::create_dir_all(&dotted).unwrap();
-        std::fs::write(&exe, b"").unwrap();
-        std::fs::write(&bare, b"").unwrap();
+        for f in [&exe, &doc, &bare] {
+            std::fs::write(f, b"").unwrap();
+        }
+        let is = |p: &Path, a, open: bool| match decide(p, a) {
+            Some(Act::Open) => open,
+            Some(Act::Reveal) => !open,
+            None => false,
+        };
 
-        assert!(is_valid(&base, true));
-        assert!(is_valid(&dotted, true));
-        assert!(!is_valid(&exe, true));
-        assert!(!is_valid(&bare, true));
-        // 關閉開關時維持原行為
-        assert!(is_valid(&exe, false));
+        // 資料夾：任何設定都直接開
+        for a in [Ignore, Reveal, Open] {
+            assert!(is(&base, a, true) && is(&dotted, a, true));
+        }
+        assert!(decide(&doc, Ignore).is_none());
+        assert!(is(&doc, Reveal, false));
+        assert!(is(&doc, Open, true));
+        assert!(is(&bare, Open, true));
+        // 危險副檔名（不分大小寫）即使選「直接開啟」也只選取
+        assert!(is(&exe, Open, false));
+        assert!(decide(&base.join("missing.txt"), Open).is_none());
         let _ = std::fs::remove_dir_all(&base);
     }
 }
