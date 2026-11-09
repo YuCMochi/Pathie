@@ -256,7 +256,14 @@ fn handle_clipboard(hwnd: HWND) {
 }
 
 fn normalize(raw: &str) -> Option<PathBuf> {
-    let t = raw.trim().trim_matches('"');
+    // 多行（如在檔案總管選多個檔案「複製為路徑」）只取第一個非空行；
+    // 引號含直引號與彎引號，且引號內外的空白一併去掉
+    let strip = |c: char| c.is_whitespace() || matches!(c, '"' | '“' | '”');
+    let t = raw
+        .lines()
+        .map(|l| l.trim_matches(strip))
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
     if t.is_empty() {
         return None;
     }
@@ -594,6 +601,9 @@ mod tests {
             s.clone(),
             format!("  {s}  "),
             format!("\"{s}\""),
+            format!("“{s}”"),
+            format!("\" {s} \""),
+            format!("\"{s}\"\r\n\"{s}x\""),
             slashed.clone(),
             format!("file:///{}", slashed.replace(' ', "%20")),
         ];
