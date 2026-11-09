@@ -37,6 +37,8 @@ const AUTOSTART_ARG: &str = "--autostart";
 // 「檔案行為」的存放位置（DWORD：0 不處理／1 選取／2 直接開啟，缺值視為 1）
 const SETTINGS_KEY: &str = r"Software\Pathie";
 const FILE_ACTION_VALUE: &str = "FileAction";
+// 是否處理 UNC 網路路徑（DWORD，缺值視為關閉）
+const ALLOW_UNC_VALUE: &str = "AllowUnc";
 // 防濫用：每分鐘最多自動開啟幾次，超過就自動暫停監控並通知
 const RATE_LIMIT_VALUE: &str = "RateLimitPerMinute";
 const RATE_WINDOW: Duration = Duration::from_secs(60);
@@ -54,6 +56,7 @@ const ID_STARTUP: usize = 1;
 const ID_TOGGLE: usize = 2;
 const ID_EXIT: usize = 3;
 const ID_ABOUT: usize = 4;
+const ID_UNC: usize = 5;
 // 頻率上限子選單：ID_RATE_BASE + RATE_OPTIONS 的索引
 const ID_RATE_BASE: usize = 100;
 // 檔案行為子選單：ID_FILE_BASE + FileAction 的值
@@ -65,6 +68,7 @@ const IDI_OFF: u16 = 3;
 
 thread_local! {
     static MONITORING: Cell<bool> = const { Cell::new(true) };
+    static ALLOW_UNC: Cell<bool> = const { Cell::new(false) };
     static FILE_ACTION: Cell<FileAction> = const { Cell::new(FileAction::Reveal) };
     static RATE_LIMIT: Cell<u32> = const { Cell::new(RATE_DEFAULT) };
     // 最近 RATE_WINDOW 內每次自動開啟的時間點
@@ -123,6 +127,7 @@ fn main() {
 
         WM_TASKBAR_CREATED.set(RegisterWindowMessageW(w!("TaskbarCreated")));
         FILE_ACTION.set(load_file_action());
+        ALLOW_UNC.set(load_allow_unc());
         RATE_LIMIT.set(load_rate_limit());
         let _ = AddClipboardFormatListener(hwnd);
         tray_add(hwnd);
@@ -169,6 +174,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             match (wp.0 & 0xFFFF) as usize {
                 ID_STARTUP => set_startup(!is_startup_enabled()),
                 ID_TOGGLE => toggle_monitoring(hwnd),
+                ID_UNC => {
+                    let on = !ALLOW_UNC.get();
+                    ALLOW_UNC.set(on);
+                    save_allow_unc(on);
+                }
                 id @ ID_FILE_BASE.. => {
                     if let Some(a) = FileAction::from_u32((id - ID_FILE_BASE) as u32) {
                         FILE_ACTION.set(a);
@@ -242,6 +252,9 @@ fn handle_clipboard(hwnd: HWND) {
     // 網址一律直接開啟（已限制為 http/https），其餘照路徑規則處理
     let target = parse_url(&text).map(|u| (u, Act::Open)).or_else(|| {
         let path = normalize(&text)?;
+        if is_unc(&path) && !ALLOW_UNC.get() {
+            return None;
+        }
         let act = decide(&path, FILE_ACTION.get())?;
         Some((path.to_string_lossy().into_owned(), act))
     });
@@ -357,6 +370,12 @@ fn is_dangerous(p: &Path) -> bool {
     p.extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| DANGEROUS_EXTS.iter().any(|d| e.eq_ignore_ascii_case(d)))
+}
+
+/// `\\host\share`、`\\?\...` 等 `\\` 開頭的路徑。
+/// 光是 exists()/is_dir() 檢查就會主動連 SMB，可能把 NTLM hash 送給對方，所以要在碰檔案系統前擋掉。
+fn is_unc(p: &Path) -> bool {
+    p.as_os_str().to_string_lossy().starts_with(r"\\")
 }
 
 /// 決定要對這個路徑做什麼；None 表示不處理。
@@ -547,6 +566,8 @@ unsafe fn show_menu(hwnd: HWND) {
         }
         let _ = AppendMenuW(menu, MF_POPUP, sub.0 as usize, w!("複製檔案時"));
     }
+    let unc = if ALLOW_UNC.get() { MF_CHECKED } else { MF_UNCHECKED };
+    let _ = AppendMenuW(menu, MF_STRING | unc, ID_UNC, w!("處理網路路徑 (\\\\host\\share)"));
     if let Ok(sub) = CreatePopupMenu() {
         let cur = RATE_LIMIT.get();
         for (i, n) in RATE_OPTIONS.iter().enumerate() {
@@ -640,6 +661,19 @@ fn load_file_action() -> FileAction {
         .ok()
         .and_then(FileAction::from_u32)
         .unwrap_or(FileAction::Reveal)
+}
+
+fn load_allow_unc() -> bool {
+    RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey(SETTINGS_KEY)
+        .and_then(|k| k.get_value::<u32, _>(ALLOW_UNC_VALUE))
+        .map_or(false, |v| v != 0)
+}
+
+fn save_allow_unc(on: bool) {
+    if let Ok((key, _)) = RegKey::predef(HKEY_CURRENT_USER).create_subkey(SETTINGS_KEY) {
+        let _ = key.set_value(ALLOW_UNC_VALUE, &u32::from(on));
+    }
 }
 
 fn save_file_action(a: FileAction) {
@@ -797,6 +831,23 @@ mod tests {
         assert!(is(&exe, Open, false));
         assert!(decide(&base.join("missing.txt"), Open).is_none());
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn unc_paths_are_detected_in_every_form() {
+        for s in [
+            r"\\host\share\a.txt",
+            "//host/share/a.txt",
+            r#""\\host\share""#,
+            "file://host/share/a.txt",
+            r"\\?\C:\Windows",
+        ] {
+            let p = normalize(s).unwrap_or_else(|| panic!("normalize 失敗: {s:?}"));
+            assert!(is_unc(&p), "應視為 UNC: {s:?} -> {p:?}");
+        }
+        for s in [r"C:\Windows", "C:/Windows", "%TEMP%"] {
+            assert!(!is_unc(&normalize(s).unwrap()), "不該是 UNC: {s:?}");
+        }
     }
 
     #[test]
