@@ -13,6 +13,7 @@ use windows::core::{w, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
     GetLastError, ERROR_ALREADY_EXISTS, HMODULE, HWND, LPARAM, LRESULT, POINT, WPARAM,
 };
+use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::DataExchange::{
     AddClipboardFormatListener, RemoveClipboardFormatListener,
 };
@@ -20,7 +21,8 @@ use windows::Win32::System::Environment::ExpandEnvironmentStringsW;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::Shell::{
-    PathCreateFromUrlW, ShellExecuteW, Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP,
+    ILCreateFromPathW, ILFree, PathCreateFromUrlW, SHOpenFolderAndSelectItems, ShellExecuteW,
+    Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP,
     NIIF_INFO, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -85,7 +87,9 @@ fn main() {
             return;
         }
 
-        let hinst: HMODULE = GetModuleHandleW(None).expect("GetModuleHandleW");
+        // SHOpenFolderAndSelectItems 需要 COM；STA 對應有訊息迴圈的 UI 執行緒
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let hinst: HMODULE =GetModuleHandleW(None).expect("GetModuleHandleW");
         let wc = WNDCLASSW {
             lpfnWndProc: Some(wndproc),
             hInstance: hinst.into(),
@@ -346,8 +350,20 @@ fn decide(p: &Path, files: FileAction) -> Option<Act> {
 }
 
 /// 在檔案總管開啟所在資料夾並選取該檔案
+///
+/// 不用 `explorer /select`：它每次都開新視窗；SHOpenFolderAndSelectItems 會重用
+/// 已開啟該資料夾的視窗（需要先 CoInitializeEx，見 main）。
 fn reveal(path: &str) {
-    shell_execute("explorer.exe", Some(&format!("/select,\"{path}\"")));
+    let wide: Vec<u16> = path.encode_utf16().chain(Some(0)).collect();
+    unsafe {
+        let pidl = ILCreateFromPathW(PCWSTR(wide.as_ptr()));
+        if pidl.is_null() {
+            return;
+        }
+        // cidl=0：pidl 本身就是要選取的項目，Explorer 會自己找出父資料夾
+        let _ = SHOpenFolderAndSelectItems(pidl, Some(&[]), 0);
+        ILFree(Some(pidl));
+    }
 }
 
 /// 用預設程式開啟路徑或網址（等同在檔案總管雙擊）
