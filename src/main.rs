@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use windows::core::{w, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
-    GetLastError, ERROR_ALREADY_EXISTS, HMODULE, HWND, LPARAM, LRESULT, POINT, WPARAM,
+    CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HMODULE, HWND, LPARAM, LRESULT, POINT, WPARAM,
 };
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::DataExchange::{
@@ -19,7 +19,10 @@ use windows::Win32::System::DataExchange::{
 };
 use windows::Win32::System::Environment::ExpandEnvironmentStringsW;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::Threading::CreateMutexW;
+use windows::Win32::System::Threading::{
+    CreateMutexW, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+    PROCESS_QUERY_LIMITED_INFORMATION,
+};
 use windows::Win32::UI::Shell::{
     ILCreateFromPathW, ILFree, PathCreateFromUrlW, SHOpenFolderAndSelectItems, ShellExecuteW,
     Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP,
@@ -39,6 +42,11 @@ const SETTINGS_KEY: &str = r"Software\Pathie";
 const FILE_ACTION_VALUE: &str = "FileAction";
 // 是否處理 UNC 網路路徑（DWORD，缺值視為關閉）
 const ALLOW_UNC_VALUE: &str = "AllowUnc";
+// 是否自動開啟網址（DWORD，缺值視為開啟）
+const OPEN_URL_VALUE: &str = "OpenUrl";
+// 複製時前景視窗是瀏覽器就略過網址（DWORD，缺值視為開啟）
+const SKIP_BROWSER_VALUE: &str = "SkipUrlFromBrowser";
+const BROWSERS: [&str; 6] = ["chrome", "msedge", "firefox", "brave", "opera", "vivaldi"];
 // 防濫用：每分鐘最多自動開啟幾次，超過就自動暫停監控並通知
 const RATE_LIMIT_VALUE: &str = "RateLimitPerMinute";
 const RATE_WINDOW: Duration = Duration::from_secs(60);
@@ -57,6 +65,8 @@ const ID_TOGGLE: usize = 2;
 const ID_EXIT: usize = 3;
 const ID_ABOUT: usize = 4;
 const ID_UNC: usize = 5;
+const ID_OPEN_URL: usize = 6;
+const ID_SKIP_BROWSER: usize = 7;
 // 頻率上限子選單：ID_RATE_BASE + RATE_OPTIONS 的索引
 const ID_RATE_BASE: usize = 100;
 // 檔案行為子選單：ID_FILE_BASE + FileAction 的值
@@ -69,6 +79,8 @@ const IDI_OFF: u16 = 3;
 thread_local! {
     static MONITORING: Cell<bool> = const { Cell::new(true) };
     static ALLOW_UNC: Cell<bool> = const { Cell::new(false) };
+    static OPEN_URL: Cell<bool> = const { Cell::new(true) };
+    static SKIP_BROWSER: Cell<bool> = const { Cell::new(true) };
     static FILE_ACTION: Cell<FileAction> = const { Cell::new(FileAction::Reveal) };
     static RATE_LIMIT: Cell<u32> = const { Cell::new(RATE_DEFAULT) };
     // 最近 RATE_WINDOW 內每次自動開啟的時間點
@@ -128,6 +140,8 @@ fn main() {
         WM_TASKBAR_CREATED.set(RegisterWindowMessageW(w!("TaskbarCreated")));
         FILE_ACTION.set(load_file_action());
         ALLOW_UNC.set(load_allow_unc());
+        OPEN_URL.set(load_bool(OPEN_URL_VALUE, true));
+        SKIP_BROWSER.set(load_bool(SKIP_BROWSER_VALUE, true));
         RATE_LIMIT.set(load_rate_limit());
         let _ = AddClipboardFormatListener(hwnd);
         tray_add(hwnd);
@@ -178,6 +192,16 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     let on = !ALLOW_UNC.get();
                     ALLOW_UNC.set(on);
                     save_allow_unc(on);
+                }
+                ID_OPEN_URL => {
+                    let on = !OPEN_URL.get();
+                    OPEN_URL.set(on);
+                    save_bool(OPEN_URL_VALUE, on);
+                }
+                ID_SKIP_BROWSER => {
+                    let on = !SKIP_BROWSER.get();
+                    SKIP_BROWSER.set(on);
+                    save_bool(SKIP_BROWSER_VALUE, on);
                 }
                 id @ ID_FILE_BASE.. => {
                     if let Some(a) = FileAction::from_u32((id - ID_FILE_BASE) as u32) {
@@ -249,18 +273,27 @@ fn handle_clipboard(hwnd: HWND) {
     let Ok(text) = clipboard_win::get_clipboard_string() else {
         return;
     };
-    // 網址一律直接開啟（已限制為 http/https），其餘照路徑規則處理
-    let target = parse_url(&text).map(|u| (u, Act::Open)).or_else(|| {
-        let path = normalize(&text)?;
-        if is_unc(&path) && !ALLOW_UNC.get() {
-            return None;
+    // 網址直接開啟（已限制為 http/https），其餘照路徑規則處理。
+    // 網址若被開關擋下就直接結束，不能落入路徑分支（www.x 之類可能被當成檔名）
+    if let Some(url) = parse_url(&text) {
+        if !OPEN_URL.get() || (SKIP_BROWSER.get() && foreground_is_browser()) {
+            return;
         }
-        let act = decide(&path, FILE_ACTION.get())?;
-        Some((path.to_string_lossy().into_owned(), act))
-    });
-    let Some((target, act)) = target else {
+        return act_on(hwnd, url, Act::Open);
+    }
+    let Some(path) = normalize(&text) else {
         return;
     };
+    if is_unc(&path) && !ALLOW_UNC.get() {
+        return;
+    }
+    if let Some(act) = decide(&path, FILE_ACTION.get()) {
+        act_on(hwnd, path.to_string_lossy().into_owned(), act);
+    }
+}
+
+/// 頻率檢查後執行動作；網址與路徑共用同一個計數
+fn act_on(hwnd: HWND, target: String, act: Act) {
     let limit = RATE_LIMIT.get();
     if OPENS.with_borrow_mut(|o| rate_exceeded(o, Instant::now(), limit)) {
         // 自動暫停而非只丟棄：洪水持續時每次都通知本身就是干擾
@@ -277,6 +310,28 @@ fn handle_clipboard(hwnd: HWND) {
     match act {
         Act::Open => shell_open(&target),
         Act::Reveal => reveal(&target),
+    }
+}
+
+/// 程序名稱（不含副檔名、不分大小寫）是否為已知瀏覽器
+fn is_browser_exe(path: &str) -> bool {
+    let stem = Path::new(path).file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    BROWSERS.iter().any(|b| stem.eq_ignore_ascii_case(b))
+}
+
+/// 目前前景視窗是否屬於瀏覽器；查不到（權限不足等）一律視為否，維持原行為
+fn foreground_is_browser() -> bool {
+    unsafe {
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(GetForegroundWindow(), Some(&mut pid));
+        let Ok(h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            return false;
+        };
+        let mut buf = [0u16; 520];
+        let mut len = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len);
+        let _ = CloseHandle(h);
+        ok.is_ok() && is_browser_exe(&String::from_utf16_lossy(&buf[..len as usize]))
     }
 }
 
@@ -568,6 +623,14 @@ unsafe fn show_menu(hwnd: HWND) {
     }
     let unc = if ALLOW_UNC.get() { MF_CHECKED } else { MF_UNCHECKED };
     let _ = AppendMenuW(menu, MF_STRING | unc, ID_UNC, w!("處理網路路徑 (\\\\host\\share)"));
+    let check = |on: bool| if on { MF_CHECKED } else { MF_UNCHECKED };
+    let _ = AppendMenuW(menu, MF_STRING | check(OPEN_URL.get()), ID_OPEN_URL, w!("自動開啟網址"));
+    let _ = AppendMenuW(
+        menu,
+        MF_STRING | check(SKIP_BROWSER.get()),
+        ID_SKIP_BROWSER,
+        w!("從瀏覽器複製的網址不開啟"),
+    );
     if let Ok(sub) = CreatePopupMenu() {
         let cur = RATE_LIMIT.get();
         for (i, n) in RATE_OPTIONS.iter().enumerate() {
@@ -663,17 +726,25 @@ fn load_file_action() -> FileAction {
         .unwrap_or(FileAction::Reveal)
 }
 
-fn load_allow_unc() -> bool {
+fn load_bool(name: &str, default: bool) -> bool {
     RegKey::predef(HKEY_CURRENT_USER)
         .open_subkey(SETTINGS_KEY)
-        .and_then(|k| k.get_value::<u32, _>(ALLOW_UNC_VALUE))
-        .map_or(false, |v| v != 0)
+        .and_then(|k| k.get_value::<u32, _>(name))
+        .map_or(default, |v| v != 0)
+}
+
+fn save_bool(name: &str, on: bool) {
+    if let Ok((key, _)) = RegKey::predef(HKEY_CURRENT_USER).create_subkey(SETTINGS_KEY) {
+        let _ = key.set_value(name, &u32::from(on));
+    }
+}
+
+fn load_allow_unc() -> bool {
+    load_bool(ALLOW_UNC_VALUE, false)
 }
 
 fn save_allow_unc(on: bool) {
-    if let Ok((key, _)) = RegKey::predef(HKEY_CURRENT_USER).create_subkey(SETTINGS_KEY) {
-        let _ = key.set_value(ALLOW_UNC_VALUE, &u32::from(on));
-    }
+    save_bool(ALLOW_UNC_VALUE, on);
 }
 
 fn save_file_action(a: FileAction) {
@@ -847,6 +918,16 @@ mod tests {
         }
         for s in [r"C:\Windows", "C:/Windows", "%TEMP%"] {
             assert!(!is_unc(&normalize(s).unwrap()), "不該是 UNC: {s:?}");
+        }
+    }
+
+    #[test]
+    fn browser_exe_matches_by_stem() {
+        for p in [r"C:\Program Files\Google\Chrome\Application\chrome.exe", r"C:\x\MSEdge.EXE", "firefox.exe"] {
+            assert!(is_browser_exe(p), "{p}");
+        }
+        for p in ["notepad.exe", r"C:\x\chrome-helper.exe", "", "explorer.exe"] {
+            assert!(!is_browser_exe(p), "{p}");
         }
     }
 
