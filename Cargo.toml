@@ -1,6 +1,6 @@
 [package]
 name = "pathie"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 # version / authors / repository 會在編譯時讀進程式，顯示在「關於」視窗
 authors = ["YuCMochi"]
