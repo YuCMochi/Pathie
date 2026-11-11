@@ -46,7 +46,7 @@ const ALLOW_UNC_VALUE: &str = "AllowUnc";
 const OPEN_URL_VALUE: &str = "OpenUrl";
 // 複製時前景視窗是瀏覽器就略過網址（DWORD，缺值視為開啟）
 const SKIP_BROWSER_VALUE: &str = "SkipUrlFromBrowser";
-const BROWSERS: [&str; 6] = ["chrome", "msedge", "firefox", "brave", "opera", "vivaldi"];
+const BROWSERS: [&str; 9] = ["chrome", "msedge", "firefox", "brave", "opera", "vivaldi", "zen", "arc", "dia"];
 // 防濫用：每分鐘最多自動開啟幾次，超過就自動暫停監控並通知
 const RATE_LIMIT_VALUE: &str = "RateLimitPerMinute";
 const RATE_WINDOW: Duration = Duration::from_secs(60);
@@ -923,7 +923,7 @@ mod tests {
 
     #[test]
     fn browser_exe_matches_by_stem() {
-        for p in [r"C:\Program Files\Google\Chrome\Application\chrome.exe", r"C:\x\MSEdge.EXE", "firefox.exe"] {
+        for p in [r"C:\Program Files\Google\Chrome\Application\chrome.exe", r"C:\x\MSEdge.EXE", "firefox.exe", "Zen.exe", "Arc.exe", "Dia.exe"] {
             assert!(is_browser_exe(p), "{p}");
         }
         for p in ["notepad.exe", r"C:\x\chrome-helper.exe", "", "explorer.exe"] {
