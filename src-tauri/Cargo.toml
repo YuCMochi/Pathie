@@ -2,16 +2,24 @@
 name = "pathie"
 version = "0.2.1"
 edition = "2021"
-# version / authors / repository 會在編譯時讀進程式，顯示在「關於」視窗
+# version / authors / repository 會在編譯時讀進程式，顯示在「關於」頁
 authors = ["YuCMochi"]
 repository = "https://github.com/YuCMochi/Pathie"
 
-# exe 名稱即產品名;開機自動啟動的 Run 值與登錄檔位置也用同一個名字
+# exe 名稱即產品名;開機自動啟動的 Run 值也用同一個名字
 [[bin]]
 name = "Pathie"
 path = "src/main.rs"
 
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
 [dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-ico"] }
+tauri-plugin-single-instance = "2"
+tauri-plugin-notification = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 clipboard-win = "5"
 winreg = "0.52"
 
@@ -30,9 +38,6 @@ features = [
     "Win32_UI_Shell_Common",
     "Win32_UI_WindowsAndMessaging",
 ]
-
-[build-dependencies]
-embed-resource = "2"
 
 [profile.release]
 opt-level = "z"

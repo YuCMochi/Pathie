@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "設定視窗與浮窗可用的權限",
+  "windows": ["settings", "toast"],
+  "permissions": ["core:default", "notification:default"]
+}

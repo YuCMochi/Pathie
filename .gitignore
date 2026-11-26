@@ -3,3 +3,7 @@
 *.user
 *.suo
 /dist/
+node_modules/
+/ui/dist/
+/src-tauri/target/
+/src-tauri/gen/

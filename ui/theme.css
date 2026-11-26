@@ -1,0 +1,75 @@
+/* 顏色、圓角、字型都用變數；日後要換皮或做 Mac 風格，只改這個檔 */
+:root {
+  --bg: #f3f3f3;
+  --surface: #ffffff;
+  --surface-hover: #f9f9f9;
+  --sidebar-hover: rgba(0, 0, 0, 0.05);
+  --sidebar-active: rgba(0, 0, 0, 0.07);
+  --border: rgba(0, 0, 0, 0.08);
+  --text: #1b1b1b;
+  --text-dim: #5f5f5f;
+  --accent: #0067c0;
+  --accent-text: #ffffff;
+  --switch-off: #8a8a8a;
+  --warn-bg: #fff4ce;
+  --warn-text: #5d4300;
+  --radius: 8px;
+  --font: 'Segoe UI Variable', 'Segoe UI', 'Microsoft JhengHei UI', system-ui, sans-serif;
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #202020;
+    --surface: #2b2b2b;
+    --surface-hover: #323232;
+    --sidebar-hover: rgba(255, 255, 255, 0.06);
+    --sidebar-active: rgba(255, 255, 255, 0.09);
+    --border: rgba(255, 255, 255, 0.08);
+    --text: #ffffff;
+    --text-dim: #c5c5c5;
+    --accent: #60cdff;
+    --accent-text: #003a5c;
+    --switch-off: #9a9a9a;
+    --warn-bg: #433519;
+    --warn-text: #fce100;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 14px;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+h1 {
+  font-size: 24px;
+  font-weight: 600;
+  margin: 0 0 16px;
+}
+
+h2 {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 20px 0 8px;
+}
+
+p {
+  margin: 0 0 8px;
+  line-height: 1.6;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+}
