@@ -88,9 +88,11 @@ pub fn normalize(raw: &str) -> Option<PathBuf> {
 }
 
 /// 使用者對「檔案」（非資料夾）的處理方式。資料夾一律直接開啟。
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum FileAction {
     Ignore = 0,
+    #[default]
     Reveal = 1,
     Open = 2,
 }

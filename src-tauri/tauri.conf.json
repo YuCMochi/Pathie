@@ -1,0 +1,47 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Pathie",
+  "identifier": "com.yucmochi.pathie",
+  "build": {
+    "frontendDist": "../ui/dist",
+    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "security": { "csp": null },
+    "windows": [
+      {
+        "label": "settings",
+        "title": "Pathie 設定",
+        "url": "index.html",
+        "width": 880,
+        "height": 620,
+        "minWidth": 640,
+        "minHeight": 480,
+        "center": true,
+        "visible": false
+      },
+      {
+        "label": "toast",
+        "url": "toast.html",
+        "width": 340,
+        "height": 72,
+        "visible": false,
+        "decorations": false,
+        "transparent": true,
+        "shadow": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false,
+        "focus": false,
+        "focusable": false
+      }
+    ]
+  },
+  "bundle": {
+    "active": false,
+    "icon": ["icons/icon.ico"]
+  }
+}

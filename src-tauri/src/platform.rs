@@ -1,7 +1,13 @@
 // Win32 平台層：開啟/選取、環境變數、前景視窗、開機自動啟動(Run 值)。
 
-use windows::core::{PCWSTR, PWSTR};
-use windows::Win32::Foundation::{CloseHandle, HWND};
+use std::cell::RefCell;
+use std::path::PathBuf;
+
+use windows::core::{w, PCWSTR, PWSTR};
+use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+use windows::Win32::System::DataExchange::AddClipboardFormatListener;
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Environment::ExpandEnvironmentStringsW;
 use windows::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION};
 use windows::Win32::UI::Shell::{ILCreateFromPathW, ILFree, PathCreateFromUrlW, SHOpenFolderAndSelectItems, ShellExecuteW};
@@ -9,7 +15,8 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use winreg::enums::{HKEY_CURRENT_USER, KEY_SET_VALUE};
 use winreg::RegKey;
 
-use crate::logic::is_browser_exe;
+use crate::logic::{is_browser_exe, FileAction, RATE_DEFAULT, RATE_OPTIONS};
+use crate::settings::Settings;
 
 // 開機自動啟動 (Run 值)
 pub const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -138,6 +145,92 @@ pub fn set_startup(enable: bool) {
     } else {
         let _ = key.delete_value(RUN_VALUE);
     }
+}
+
+// --- 設定檔位置與舊版(登錄檔)設定 ---------------------------------------
+
+/// `%APPDATA%\Pathie`
+pub fn config_dir() -> PathBuf {
+    std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("Pathie")
+}
+
+/// 0.2.x 以前存在 `HKCU\Software\Pathie` 的設定；沒有這個機碼回傳 None（全新安裝）
+pub fn legacy_settings() -> Option<Settings> {
+    let key = RegKey::predef(HKEY_CURRENT_USER).open_subkey(r"Software\Pathie").ok()?;
+    let num = |name: &str| key.get_value::<u32, _>(name).ok();
+    let flag = |name: &str, default: bool| num(name).map_or(default, |v| v != 0);
+    Some(Settings {
+        file_action: num("FileAction").and_then(FileAction::from_u32).unwrap_or_default(),
+        allow_unc: flag("AllowUnc", false),
+        open_url: flag("OpenUrl", true),
+        skip_url_from_browser: flag("SkipUrlFromBrowser", true),
+        rate_limit_per_minute: num("RateLimitPerMinute")
+            .filter(|n| RATE_OPTIONS.contains(n))
+            .unwrap_or(RATE_DEFAULT),
+        ..Default::default()
+    })
+}
+
+// --- 剪貼簿監聽 ------------------------------------------------------------
+
+thread_local! {
+    static ON_UPDATE: RefCell<Option<Box<dyn Fn()>>> = const { RefCell::new(None) };
+}
+
+/// 在獨立執行緒開一個隱藏視窗訂閱剪貼簿變動，每次變動呼叫 `on_update`。
+/// 不用 HWND_MESSAGE：message-only window 搭剪貼簿監聽有已知的雷。
+pub fn spawn_clipboard_listener(on_update: impl Fn() + Send + 'static) {
+    std::thread::spawn(move || unsafe {
+        // SHOpenFolderAndSelectItems 需要 COM；STA 對應有訊息迴圈的執行緒
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        ON_UPDATE.with(|c| *c.borrow_mut() = Some(Box::new(on_update)));
+        let Ok(hinst) = GetModuleHandleW(None) else { return };
+        let class = w!("PathieClipboardWnd");
+        RegisterClassW(&WNDCLASSW {
+            lpfnWndProc: Some(clipboard_proc),
+            hInstance: hinst.into(),
+            lpszClassName: class,
+            ..Default::default()
+        });
+        let Ok(hwnd) = CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            class,
+            w!("Pathie"),
+            WS_OVERLAPPED,
+            0,
+            0,
+            0,
+            0,
+            None,
+            None,
+            hinst,
+            None,
+        ) else {
+            return;
+        };
+        let _ = AddClipboardFormatListener(hwnd);
+        let mut msg = MSG::default();
+        // > 0：GetMessageW 出錯時回 -1，用 as_bool() 會變成無窮迴圈
+        while GetMessageW(&mut msg, HWND::default(), 0, 0).0 > 0 {
+            let _ = TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    });
+}
+
+unsafe extern "system" fn clipboard_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    if msg == WM_CLIPBOARDUPDATE {
+        ON_UPDATE.with(|c| {
+            if let Some(f) = c.borrow().as_ref() {
+                f();
+            }
+        });
+        return LRESULT(0);
+    }
+    DefWindowProcW(hwnd, msg, wp, lp)
 }
 
 #[cfg(test)]
