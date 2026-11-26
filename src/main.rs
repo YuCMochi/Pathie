@@ -4,39 +4,35 @@
 // 一起變成 windows subsystem，測試輸出就看不到了。
 #![cfg_attr(not(test), windows_subsystem = "windows")]
 
+mod logic;
+mod platform;
+
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
-use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-use windows::core::{w, PCWSTR, PWSTR};
+use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{
-    CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HMODULE, HWND, LPARAM, LRESULT, POINT, WPARAM,
+    GetLastError, ERROR_ALREADY_EXISTS, HMODULE, HWND, LPARAM, LRESULT, POINT, WPARAM,
 };
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::DataExchange::{
     AddClipboardFormatListener, RemoveClipboardFormatListener,
 };
-use windows::Win32::System::Environment::ExpandEnvironmentStringsW;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::Threading::{
-    CreateMutexW, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
-    PROCESS_QUERY_LIMITED_INFORMATION,
-};
+use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::Shell::{
-    ILCreateFromPathW, ILFree, PathCreateFromUrlW, SHOpenFolderAndSelectItems, ShellExecuteW,
     Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP,
     NIIF_INFO, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
-use winreg::enums::{HKEY_CURRENT_USER, KEY_SET_VALUE};
+use winreg::enums::HKEY_CURRENT_USER;
 use winreg::RegKey;
 
+use logic::*;
+use platform::*;
+
 // 登錄檔位置與值名：開機自動啟動 (Run 值) 與使用者設定
-const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
-const RUN_VALUE: &str = "Pathie";
-// 開機自動啟動時帶的參數，用來跳過「已啟動」通知
-const AUTOSTART_ARG: &str = "--autostart";
 // 「檔案行為」的存放位置（DWORD：0 不處理／1 選取／2 直接開啟，缺值視為 1）
 const SETTINGS_KEY: &str = r"Software\Pathie";
 const FILE_ACTION_VALUE: &str = "FileAction";
@@ -46,12 +42,8 @@ const ALLOW_UNC_VALUE: &str = "AllowUnc";
 const OPEN_URL_VALUE: &str = "OpenUrl";
 // 複製時前景視窗是瀏覽器就略過網址（DWORD，缺值視為開啟）
 const SKIP_BROWSER_VALUE: &str = "SkipUrlFromBrowser";
-const BROWSERS: [&str; 9] = ["chrome", "msedge", "firefox", "brave", "opera", "vivaldi", "zen", "arc", "dia"];
 // 防濫用：每分鐘最多自動開啟幾次，超過就自動暫停監控並通知
 const RATE_LIMIT_VALUE: &str = "RateLimitPerMinute";
-const RATE_WINDOW: Duration = Duration::from_secs(60);
-const RATE_OPTIONS: [u32; 4] = [10, 20, 50, 100];
-const RATE_DEFAULT: u32 = 20;
 
 const WM_TRAY: u32 = WM_APP + 1;
 // 第二個實例啟動時送給既有實例，請它跳通知，讓使用者雙擊 exe 時一定有回饋
@@ -252,20 +244,6 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
 
 // --- 剪貼簿 ---------------------------------------------------------------
 
-/// 滑動視窗計數：回傳 true 表示已達上限（此次不計入）；否則記錄這次並回傳 false。
-fn rate_exceeded(opens: &mut VecDeque<Instant>, now: Instant, limit: u32) -> bool {
-    while opens
-        .front()
-        .is_some_and(|&t| now.duration_since(t) >= RATE_WINDOW)
-    {
-        opens.pop_front();
-    }
-    if opens.len() >= limit as usize {
-        return true;
-    }
-    opens.push_back(now);
-    false
-}
 
 fn handle_clipboard(hwnd: HWND) {
     // clipboard-win 內建重試：WM_CLIPBOARDUPDATE 當下來源程式往往還佔著剪貼簿，
@@ -313,211 +291,7 @@ fn act_on(hwnd: HWND, target: String, act: Act) {
     }
 }
 
-/// 程序名稱（不含副檔名、不分大小寫）是否為已知瀏覽器
-fn is_browser_exe(path: &str) -> bool {
-    let stem = Path::new(path).file_stem().and_then(|s| s.to_str()).unwrap_or("");
-    BROWSERS.iter().any(|b| stem.eq_ignore_ascii_case(b))
-}
 
-/// 目前前景視窗是否屬於瀏覽器；查不到（權限不足等）一律視為否，維持原行為
-fn foreground_is_browser() -> bool {
-    unsafe {
-        let mut pid = 0u32;
-        GetWindowThreadProcessId(GetForegroundWindow(), Some(&mut pid));
-        let Ok(h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
-            return false;
-        };
-        let mut buf = [0u16; 520];
-        let mut len = buf.len() as u32;
-        let ok = QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len);
-        let _ = CloseHandle(h);
-        ok.is_ok() && is_browser_exe(&String::from_utf16_lossy(&buf[..len as usize]))
-    }
-}
-
-/// 多行（如在檔案總管選多個檔案「複製為路徑」）只取第一個非空行；
-/// 引號含直引號與彎引號，且引號內外的空白一併去掉
-fn first_line(raw: &str) -> &str {
-    let strip = |c: char| c.is_whitespace() || matches!(c, '"' | '“' | '”');
-    raw.lines()
-        .map(|l| l.trim_matches(strip))
-        .find(|l| !l.is_empty())
-        .unwrap_or("")
-}
-
-/// 只認 `http(s)://` 開頭，或 `www.` 開頭（補上 https://）。
-/// 其他 scheme（ms-msdt:、search-ms: 等）與裸網域（main.py、foo.rs 的副檔名恰好是真 TLD）一律不處理。
-fn parse_url(raw: &str) -> Option<String> {
-    let t = first_line(raw);
-    // 網址不含空白或控制字元；get(..n) 避免切在多位元組字元中間
-    if t.chars().any(|c| c.is_whitespace() || c.is_control()) {
-        return None;
-    }
-    let lower = |n: usize| t.get(..n).map(str::to_ascii_lowercase);
-    let (rest, has_scheme) = if lower(8).as_deref() == Some("https://") {
-        (&t[8..], true)
-    } else if lower(7).as_deref() == Some("http://") {
-        (&t[7..], true)
-    } else if lower(4).as_deref() == Some("www.") {
-        (&t[4..], false)
-    } else {
-        return None;
-    };
-    // 主機名至少要有一個字元，且不能以 . 或 / 起頭（擋掉 "http://" "www." "https:///x" 之類）
-    if rest.is_empty() || rest.starts_with(['.', '/']) {
-        return None;
-    }
-    Some(if has_scheme { t.to_owned() } else { format!("https://{t}") })
-}
-
-fn normalize(raw: &str) -> Option<PathBuf> {
-    let t = first_line(raw);
-    if t.is_empty() {
-        return None;
-    }
-
-    // get(..7) 而非 &t[..7]：剪貼簿是任意文字，切在多位元組字元中間會 panic
-    let t = match t.get(..7) {
-        Some(p) if p.eq_ignore_ascii_case("file://") => {
-            url_to_path(t).unwrap_or_else(|| t.to_owned())
-        }
-        _ => t.to_owned(),
-    };
-
-    let t = expand_env(&t.replace('/', "\\"));
-    let t = t.trim();
-    (!t.is_empty()).then(|| PathBuf::from(t))
-}
-
-/// 使用者對「檔案」（非資料夾）的處理方式。資料夾一律直接開啟。
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum FileAction {
-    Ignore = 0,
-    Reveal = 1,
-    Open = 2,
-}
-
-impl FileAction {
-    fn from_u32(n: u32) -> Option<Self> {
-        match n {
-            0 => Some(Self::Ignore),
-            1 => Some(Self::Reveal),
-            2 => Some(Self::Open),
-            _ => None,
-        }
-    }
-}
-
-enum Act {
-    Open,
-    Reveal,
-}
-
-/// 這些副檔名直接開啟等於執行程式碼，ShellExecute 對本機檔案又不會跳警告，
-/// 所以即使使用者選「直接開啟」也一律退回「選取」。
-// ponytail: 黑名單會漏（如新的腳本類型），改白名單若誤擋太多再說
-const DANGEROUS_EXTS: &[&str] = &[
-    "exe", "bat", "cmd", "com", "scr", "msi", "msp", "ps1", "vbs", "vbe", "js", "jse", "wsf",
-    "wsh", "hta", "lnk", "url", "reg", "cpl", "jar", "dll", "pif", "gadget", "appref-ms",
-];
-
-fn is_dangerous(p: &Path) -> bool {
-    p.extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| DANGEROUS_EXTS.iter().any(|d| e.eq_ignore_ascii_case(d)))
-}
-
-/// `\\host\share`、`\\?\...` 等 `\\` 開頭的路徑。
-/// 光是 exists()/is_dir() 檢查就會主動連 SMB，可能把 NTLM hash 送給對方，所以要在碰檔案系統前擋掉。
-fn is_unc(p: &Path) -> bool {
-    p.as_os_str().to_string_lossy().starts_with(r"\\")
-}
-
-/// 決定要對這個路徑做什麼；None 表示不處理。
-///
-/// 只接受絕對路徑，避免裸檔名（如 gpedit.msc）靠工作目錄湊巧命中系統指令。
-/// Rust 的 is_absolute 比 C# 的 Path.IsPathRooted 更嚴格，連 `\Windows\...`
-/// 和 `C:foo` 這種「有 root 但非絕對」的寫法也一併擋掉。
-/// 資料夾/檔案看檔案系統實際狀態（is_dir）而非副檔名——資料夾可以叫 v1.2。
-fn decide(p: &Path, files: FileAction) -> Option<Act> {
-    if !p.is_absolute() || !p.exists() {
-        return None;
-    }
-    if p.is_dir() {
-        return Some(Act::Open);
-    }
-    match files {
-        FileAction::Ignore => None,
-        FileAction::Open if !is_dangerous(p) => Some(Act::Open),
-        _ => Some(Act::Reveal),
-    }
-}
-
-/// 在檔案總管開啟所在資料夾並選取該檔案
-///
-/// 不用 `explorer /select`：它每次都開新視窗；SHOpenFolderAndSelectItems 會重用
-/// 已開啟該資料夾的視窗（需要先 CoInitializeEx，見 main）。
-fn reveal(path: &str) {
-    let wide: Vec<u16> = path.encode_utf16().chain(Some(0)).collect();
-    unsafe {
-        let pidl = ILCreateFromPathW(PCWSTR(wide.as_ptr()));
-        if pidl.is_null() {
-            return;
-        }
-        // cidl=0：pidl 本身就是要選取的項目，Explorer 會自己找出父資料夾
-        let _ = SHOpenFolderAndSelectItems(pidl, Some(&[]), 0);
-        ILFree(Some(pidl));
-    }
-}
-
-/// 用預設程式開啟路徑或網址（等同在檔案總管雙擊）
-fn shell_open(target: &str) {
-    shell_execute(target, None);
-}
-
-fn shell_execute(target: &str, params: Option<&str>) {
-    let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(Some(0)).collect() };
-    let (t, p) = (wide(target), params.map(wide));
-    unsafe {
-        ShellExecuteW(
-            HWND::default(),
-            PCWSTR::null(),
-            PCWSTR(t.as_ptr()),
-            p.as_ref().map_or(PCWSTR::null(), |p| PCWSTR(p.as_ptr())),
-            PCWSTR::null(),
-            SW_SHOWNORMAL,
-        );
-    }
-}
-
-/// `new Uri(x).LocalPath` 的對應 API：percent-decoding 與 UNC 都交給 shlwapi，
-/// 省掉一個 url crate。
-fn url_to_path(url: &str) -> Option<String> {
-    let src: Vec<u16> = url.encode_utf16().chain(Some(0)).collect();
-    let mut buf = vec![0u16; 4096];
-    let mut len = buf.len() as u32;
-    unsafe {
-        PathCreateFromUrlW(PCWSTR(src.as_ptr()), PWSTR(buf.as_mut_ptr()), &mut len, 0).ok()?;
-    }
-    Some(String::from_utf16_lossy(&buf[..len as usize]))
-}
-
-fn expand_env(s: &str) -> String {
-    let src: Vec<u16> = s.encode_utf16().chain(Some(0)).collect();
-    unsafe {
-        let n = ExpandEnvironmentStringsW(PCWSTR(src.as_ptr()), None);
-        if n == 0 {
-            return s.to_owned();
-        }
-        let mut buf = vec![0u16; n as usize];
-        let written = ExpandEnvironmentStringsW(PCWSTR(src.as_ptr()), Some(&mut buf));
-        if written == 0 {
-            return s.to_owned();
-        }
-        // 回傳值含結尾的 null
-        String::from_utf16_lossy(&buf[..(written as usize).saturating_sub(1)])
-    }
-}
 
 // --- 系統匣 ---------------------------------------------------------------
 
@@ -676,46 +450,6 @@ unsafe fn show_about(hwnd: HWND) {
 
 // --- 開機自動啟動 ---------------------------------------------------------
 
-fn exe_path() -> String {
-    std::env::current_exe()
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_default()
-}
-
-fn is_startup_enabled() -> bool {
-    let Ok(key) = RegKey::predef(HKEY_CURRENT_USER).open_subkey(RUN_KEY) else {
-        return false;
-    };
-    let Ok(val) = key.get_value::<String, _>(RUN_VALUE) else {
-        return false;
-    };
-    let exe = exe_path();
-    !exe.is_empty() && run_value_path(&val).eq_ignore_ascii_case(&exe)
-}
-
-/// 取出 Run 值裡的 exe 路徑。新格式是 `"路徑" --autostart`，
-/// v2.1.0 以前（含 C# 版）寫的是 `"路徑"`，兩種都要認得。
-fn run_value_path(val: &str) -> &str {
-    let val = val.trim();
-    match val.strip_prefix('"').and_then(|rest| rest.split_once('"')) {
-        Some((path, _args)) => path,
-        None => val.trim_end_matches(AUTOSTART_ARG).trim_end(),
-    }
-}
-
-fn set_startup(enable: bool) {
-    let Ok(key) =
-        RegKey::predef(HKEY_CURRENT_USER).open_subkey_with_flags(RUN_KEY, KEY_SET_VALUE)
-    else {
-        return;
-    };
-    if enable {
-        let value = format!("\"{}\" {AUTOSTART_ARG}", exe_path());
-        let _ = key.set_value(RUN_VALUE, &value);
-    } else {
-        let _ = key.delete_value(RUN_VALUE);
-    }
-}
 
 fn load_file_action() -> FileAction {
     RegKey::predef(HKEY_CURRENT_USER)
@@ -773,87 +507,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rate_limit_slides_over_window() {
-        let t0 = Instant::now();
-        let mut q = VecDeque::new();
-        for i in 0..3 {
-            assert!(!rate_exceeded(&mut q, t0 + Duration::from_secs(i), 3));
-        }
-        // 視窗內第 4 次被擋，且不計入
-        assert!(rate_exceeded(&mut q, t0 + Duration::from_secs(10), 3));
-        assert_eq!(q.len(), 3);
-        // 最早那筆滿 60 秒後滑出，空出一格
-        assert!(!rate_exceeded(&mut q, t0 + Duration::from_secs(60), 3));
-        assert!(rate_exceeded(&mut q, t0 + Duration::from_secs(60), 3));
-    }
-
-    #[test]
-    fn rejects_non_paths() {
-        // commit b4b5317 要擋的就是這些：裸檔名、相對路徑、有 root 但非絕對
-        let cases = [
-            "gpedit.msc",
-            "..\\Windows",
-            "hello world",
-            "",
-            "   ",
-            "\\Windows\\System32",
-            "C:notrooted",
-        ];
-        for s in cases {
-            let rejected = normalize(s).map_or(true, |p| decide(&p, FileAction::Open).is_none());
-            assert!(rejected, "應拒絕: {s:?}");
-        }
-    }
-
-    #[test]
-    fn multibyte_input_does_not_panic() {
-        // 剪貼簿是任意文字；前綴比對若用 &t[..7] 會切在中文字中間 panic
-        for s in ["複製一段中文", "檔", "路徑自動開啟", "日本語のテキスト"] {
-            let _ = normalize(s);
-        }
-    }
-
-    #[test]
-    fn accepts_real_path_in_every_form() {
-        let dir = std::env::temp_dir().join("clipboard_rs_test 空格");
-        std::fs::create_dir_all(&dir).unwrap();
-        let s = dir.to_string_lossy().into_owned();
-        let slashed = s.replace('\\', "/");
-
-        let forms = [
-            s.clone(),
-            format!("  {s}  "),
-            format!("\"{s}\""),
-            format!("“{s}”"),
-            format!("\" {s} \""),
-            format!("\"{s}\"\r\n\"{s}x\""),
-            slashed.clone(),
-            format!("file:///{}", slashed.replace(' ', "%20")),
-        ];
-        for f in &forms {
-            let p = normalize(f).unwrap_or_else(|| panic!("normalize 回傳 None: {f:?}"));
-            assert!(decide(&p, FileAction::Reveal).is_some(), "應接受: {f:?} -> {p:?}");
-        }
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn run_value_path_reads_old_and_new_formats() {
-        let exe = r"C:\Program Files\My App\Pathie.exe";
-        let cases = [
-            format!("\"{exe}\" --autostart"), // 新格式
-            format!("\"{exe}\""),             // v2.1.0 以前、C# 版
-            format!("  \"{exe}\"  "),
-        ];
-        for v in &cases {
-            assert_eq!(run_value_path(v), exe, "無法解析: {v:?}");
-        }
-        // 沒加引號（不是我們寫的，但別人手動改過也要能讀）
-        assert_eq!(run_value_path(r"C:\x\a.exe"), r"C:\x\a.exe");
-        assert_eq!(run_value_path(r"C:\x\a.exe --autostart"), r"C:\x\a.exe");
-    }
-
-    #[test]
     fn fill_wide_truncates_and_keeps_null() {
         let mut buf = [0xFFFFu16; 4];
         fill_wide(&mut buf, "路徑自動開啟");
@@ -863,105 +516,5 @@ mod tests {
         let mut buf = [0xFFFFu16; 8];
         fill_wide(&mut buf, "ab");
         assert_eq!(&buf[..3], &[b'a' as u16, b'b' as u16, 0]);
-    }
-
-    #[test]
-    fn expands_environment_variables() {
-        let p = normalize("%TEMP%").expect("%TEMP% 應正規化成功");
-        assert!(!p.to_string_lossy().contains('%'), "未展開: {p:?}");
-        assert!(decide(&p, FileAction::Reveal).is_some(), "%TEMP% 應展開成有效路徑: {p:?}");
-    }
-
-    #[test]
-    fn file_action_decides_by_real_type_and_blocks_dangerous_ext() {
-        use FileAction::*;
-        let base = std::env::temp_dir().join("clipboard_rs_file_action");
-        let dotted = base.join("v1.2"); // 資料夾但有「副檔名」
-        let exe = base.join("a.EXE");
-        let doc = base.join("a.txt");
-        let bare = base.join("LICENSE"); // 檔案但沒副檔名
-        std::fs::create_dir_all(&dotted).unwrap();
-        for f in [&exe, &doc, &bare] {
-            std::fs::write(f, b"").unwrap();
-        }
-        let is = |p: &Path, a, open: bool| match decide(p, a) {
-            Some(Act::Open) => open,
-            Some(Act::Reveal) => !open,
-            None => false,
-        };
-
-        // 資料夾：任何設定都直接開
-        for a in [Ignore, Reveal, Open] {
-            assert!(is(&base, a, true) && is(&dotted, a, true));
-        }
-        assert!(decide(&doc, Ignore).is_none());
-        assert!(is(&doc, Reveal, false));
-        assert!(is(&doc, Open, true));
-        assert!(is(&bare, Open, true));
-        // 危險副檔名（不分大小寫）即使選「直接開啟」也只選取
-        assert!(is(&exe, Open, false));
-        assert!(decide(&base.join("missing.txt"), Open).is_none());
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    #[test]
-    fn unc_paths_are_detected_in_every_form() {
-        for s in [
-            r"\\host\share\a.txt",
-            "//host/share/a.txt",
-            r#""\\host\share""#,
-            "file://host/share/a.txt",
-            r"\\?\C:\Windows",
-        ] {
-            let p = normalize(s).unwrap_or_else(|| panic!("normalize 失敗: {s:?}"));
-            assert!(is_unc(&p), "應視為 UNC: {s:?} -> {p:?}");
-        }
-        for s in [r"C:\Windows", "C:/Windows", "%TEMP%"] {
-            assert!(!is_unc(&normalize(s).unwrap()), "不該是 UNC: {s:?}");
-        }
-    }
-
-    #[test]
-    fn browser_exe_matches_by_stem() {
-        for p in [r"C:\Program Files\Google\Chrome\Application\chrome.exe", r"C:\x\MSEdge.EXE", "firefox.exe", "Zen.exe", "Arc.exe", "Dia.exe"] {
-            assert!(is_browser_exe(p), "{p}");
-        }
-        for p in ["notepad.exe", r"C:\x\chrome-helper.exe", "", "explorer.exe"] {
-            assert!(!is_browser_exe(p), "{p}");
-        }
-    }
-
-    #[test]
-    fn parse_url_accepts_only_http_and_www() {
-        let ok = [
-            ("https://example.com/a?b=1", "https://example.com/a?b=1"),
-            ("HTTP://Example.com", "HTTP://Example.com"),
-            ("  \"http://example.com\"  ", "http://example.com"),
-            ("www.example.com/x", "https://www.example.com/x"),
-            ("WWW.example.com", "https://WWW.example.com"),
-            ("https://example.com\r\nsecond line", "https://example.com"),
-        ];
-        for (input, want) in ok {
-            assert_eq!(parse_url(input).as_deref(), Some(want), "{input:?}");
-        }
-        let bad = [
-            "main.py",
-            "foo.rs",
-            "example.com",
-            "ms-msdt:/id PCWDiagnostic",
-            "search-ms:query=x",
-            "javascript:alert(1)",
-            "file:///C:/Windows",
-            "http://",
-            "https:///x",
-            "www.",
-            "www.a b.com",
-            "see https://example.com",
-            "",
-            "複製一段中文",
-        ];
-        for s in bad {
-            assert!(parse_url(s).is_none(), "應拒絕: {s:?}");
-        }
     }
 }
