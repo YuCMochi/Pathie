@@ -5,6 +5,7 @@
 #![cfg_attr(not(test), windows_subsystem = "windows")]
 
 mod app;
+mod commands;
 mod logic;
 mod platform;
 mod settings;
@@ -21,7 +22,10 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 fn main() {
     tauri::Builder::default()
         // 單一實例；第二個實例啟動時請既有實例跳通知，讓使用者雙擊 exe 時一定有回饋
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            if args.iter().any(|a| a == platform::SETTINGS_ARG) {
+                return tray::show_settings(app, None);
+            }
             let state = if app.state::<AppState>().monitoring.load(Ordering::Relaxed) {
                 "監控中。"
             } else {
@@ -34,6 +38,16 @@ fn main() {
             );
         }))
         .plugin(tauri_plugin_notification::init())
+        .invoke_handler(tauri::generate_handler![
+            commands::app_info,
+            commands::get_settings,
+            commands::set_settings,
+            commands::get_monitoring,
+            commands::set_monitoring,
+            commands::get_startup,
+            commands::set_startup,
+            commands::open_repository,
+        ])
         .setup(|app| {
             app.manage(AppState::new(settings::load()));
             if platform::is_startup_enabled() {
@@ -56,6 +70,9 @@ fn main() {
             let handle = app.handle().clone();
             platform::spawn_clipboard_listener(move || app::handle_clipboard(&handle));
 
+            if std::env::args().any(|a| a == platform::SETTINGS_ARG) {
+                tray::show_settings(app.handle(), None);
+            }
             // 開機自動啟動不跳通知，手動雙擊才跳
             if !std::env::args().any(|a| a == platform::AUTOSTART_ARG) {
                 notify(

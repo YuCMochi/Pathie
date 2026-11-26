@@ -23,6 +23,8 @@ pub const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 pub const RUN_VALUE: &str = "Pathie";
 // 開機自動啟動時帶的參數，用來跳過「已啟動」通知
 pub const AUTOSTART_ARG: &str = "--autostart";
+// 啟動（或重複啟動）時直接開啟設定視窗
+pub const SETTINGS_ARG: &str = "--settings";
 
 /// 目前前景視窗是否屬於瀏覽器；查不到（權限不足等）一律視為否，維持原行為
 pub fn foreground_is_browser() -> bool {
