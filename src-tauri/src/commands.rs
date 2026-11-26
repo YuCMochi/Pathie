@@ -69,3 +69,12 @@ pub fn set_startup(enable: bool) -> bool {
 pub fn open_repository() {
     platform::shell_open(env!("CARGO_PKG_REPOSITORY"));
 }
+
+/// 設定頁載入完成時呼叫：需要的話此刻才顯示視窗，並回傳要切到的分頁
+#[tauri::command]
+pub fn ui_ready(app: AppHandle, state: State<AppState>) -> Option<String> {
+    if state.show_on_ready.swap(false, Ordering::Relaxed) {
+        tray::show_settings(&app, None);
+    }
+    state.initial_page.lock().unwrap().take()
+}

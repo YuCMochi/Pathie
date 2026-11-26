@@ -34,3 +34,6 @@ export async function setMonitoring(on) {
 }
 
 export const openRepository = () => invoke('open_repository');
+
+// 載入完成後通知後端（它可能此刻才顯示視窗），回傳要切到的分頁
+export const uiReady = () => invoke('ui_ready');

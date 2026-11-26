@@ -1,7 +1,7 @@
 <script>
   import { onMount } from 'svelte';
   import { listen } from '@tauri-apps/api/event';
-  import { cfg, load } from './lib/store.svelte.js';
+  import { cfg, load, uiReady } from './lib/store.svelte.js';
   import General from './pages/General.svelte';
   import Files from './pages/Files.svelte';
   import Safety from './pages/Safety.svelte';
@@ -28,7 +28,7 @@
   const current = $derived(pages.find((p) => p.id === page));
 
   onMount(() => {
-    load();
+    load().then(uiReady).then((p) => p && (page = p));
     const subs = [
       // 後端要求切換分頁（例如首次啟動直接開到使用說明）
       listen('navigate', (e) => (page = e.payload)),

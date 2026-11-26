@@ -48,9 +48,25 @@ fn main() {
             commands::get_startup,
             commands::set_startup,
             commands::open_repository,
+            commands::ui_ready,
         ])
         .setup(|app| {
-            app.manage(AppState::new(settings::load()));
+            let args: Vec<String> = std::env::args().collect();
+            let has = |flag: &str| args.iter().any(|a| a == flag);
+            let mut loaded = settings::load();
+            let state = AppState::new(loaded.clone());
+            // 首次啟動自動帶出「使用說明」；開機自動啟動時不打擾，留到下次手動啟動
+            if !loaded.first_run_done && !has(platform::AUTOSTART_ARG) {
+                loaded.first_run_done = true;
+                settings::save(&loaded);
+                *state.settings.write().unwrap() = loaded;
+                *state.initial_page.lock().unwrap() = Some("guide".into());
+                state.show_on_ready.store(true, Ordering::Relaxed);
+            }
+            if has(platform::SETTINGS_ARG) {
+                state.show_on_ready.store(true, Ordering::Relaxed);
+            }
+            app.manage(state);
             if platform::is_startup_enabled() {
                 // 把舊格式（沒有 --autostart）的開機設定升級成新格式；已是新格式則等於重寫同一個值
                 platform::set_startup(true);
@@ -71,9 +87,6 @@ fn main() {
             let handle = app.handle().clone();
             platform::spawn_clipboard_listener(move || app::handle_clipboard(&handle));
 
-            if std::env::args().any(|a| a == platform::SETTINGS_ARG) {
-                tray::show_settings(app.handle(), None);
-            }
             // 開機自動啟動不跳通知，手動雙擊才跳
             if !std::env::args().any(|a| a == platform::AUTOSTART_ARG) {
                 notify(

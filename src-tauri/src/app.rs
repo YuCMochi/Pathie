@@ -19,6 +19,10 @@ pub struct AppState {
     pub monitoring: AtomicBool,
     /// 最近 RATE_WINDOW 內每次自動開啟的時間點
     pub opens: Mutex<VecDeque<Instant>>,
+    /// 啟動時要自動開設定視窗（首次啟動、--settings）：等前端載入完成再顯示，避免先看到空白視窗
+    pub show_on_ready: AtomicBool,
+    /// 前端載入完成後要切到的分頁
+    pub initial_page: Mutex<Option<String>>,
 }
 
 impl AppState {
@@ -27,6 +31,8 @@ impl AppState {
             settings: RwLock::new(settings),
             monitoring: AtomicBool::new(true),
             opens: Mutex::new(VecDeque::new()),
+            show_on_ready: AtomicBool::new(false),
+            initial_page: Mutex::new(None),
         }
     }
 }
