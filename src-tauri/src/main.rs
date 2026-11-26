@@ -9,6 +9,7 @@ mod commands;
 mod logic;
 mod platform;
 mod settings;
+mod toast;
 mod tray;
 
 use std::sync::atomic::Ordering;

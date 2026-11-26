@@ -11,6 +11,7 @@ use tauri_plugin_notification::NotificationExt;
 use crate::logic::{decide, is_unc, normalize, parse_url, rate_exceeded, Act};
 use crate::platform::{foreground_is_browser, reveal, shell_open};
 use crate::settings::Settings;
+use crate::toast;
 use crate::tray;
 
 pub struct AppState {
@@ -82,5 +83,12 @@ fn act_on(app: &AppHandle, cfg: &Settings, target: String, act: Act) {
     match act {
         Act::Open => shell_open(&target),
         Act::Reveal => reveal(&target),
+    }
+    if cfg.show_toast {
+        let label = match act {
+            Act::Open => "由 Pathie 開啟",
+            Act::Reveal => "由 Pathie 在檔案總管選取",
+        };
+        toast::show(app, label, &target);
     }
 }
