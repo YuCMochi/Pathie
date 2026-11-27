@@ -13,7 +13,7 @@ use windows::Win32::System::Environment::ExpandEnvironmentStringsW;
 use windows::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION};
 use windows::Win32::UI::Shell::{ILCreateFromPathW, ILFree, PathCreateFromUrlW, SHOpenFolderAndSelectItems, ShellExecuteW};
 use windows::Win32::UI::WindowsAndMessaging::*;
-use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_SET_VALUE};
+use winreg::enums::{HKEY_CURRENT_USER, KEY_SET_VALUE};
 use winreg::RegKey;
 
 use crate::logic::{is_browser_exe, FileAction, RATE_DEFAULT, RATE_OPTIONS};
@@ -157,17 +157,15 @@ const UNINSTALL_KEY: &str =
     r"Software\Microsoft\Windows\CurrentVersion\Uninstall\{B3A7C0E1-5D2F-4A68-8E19-7F4C2D9A6B05}_is1";
 
 /// 目前執行的 exe 是不是安裝程式裝的那份（不是就是免安裝版）。
-/// 安裝程式預設裝在 HKCU，以系統管理員身分安裝時會寫到 HKLM，兩邊都看。
+/// 安裝程式一律是每使用者安裝（PrivilegesRequired=lowest），位置只會記在 HKCU。
 pub fn is_installed() -> bool {
     let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(PathBuf::from)) else {
         return false;
     };
-    [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE].into_iter().any(|root| {
-        RegKey::predef(root)
-            .open_subkey(UNINSTALL_KEY)
-            .and_then(|k| k.get_value::<String, _>("InstallLocation"))
-            .is_ok_and(|loc| PathBuf::from(loc.trim_end_matches('\\')).as_os_str().eq_ignore_ascii_case(dir.as_os_str()))
-    })
+    RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey(UNINSTALL_KEY)
+        .and_then(|k| k.get_value::<String, _>("InstallLocation"))
+        .is_ok_and(|loc| PathBuf::from(loc.trim_end_matches('\\')).as_os_str().eq_ignore_ascii_case(dir.as_os_str()))
 }
 
 /// 下載到指定檔案（同步，會卡住呼叫的執行緒）。用系統內建的 urlmon，省掉 HTTP 套件。
