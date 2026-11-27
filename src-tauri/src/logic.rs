@@ -153,6 +153,65 @@ pub fn decide(p: &Path, files: FileAction) -> Option<Act> {
     }
 }
 
+// --- 檢查更新 -------------------------------------------------------------
+
+/// 發佈在 GitHub Release 上的安裝程式檔名（見 installer.iss 的 OutputBaseFilename）
+pub const SETUP_ASSET: &str = "Pathie-Setup.exe";
+
+/// 解析 `v1.2.3` 形式的 tag。只認 `v` 開頭：舊的 `legacy-v2.x` 系列版本號比較大，
+/// 不能被當成新版。
+pub fn parse_tag(tag: &str) -> Option<(u32, u32, u32)> {
+    parse_version(tag.strip_prefix('v')?)
+}
+
+/// 解析 `1.2.3`；不接受預發佈後綴（`1.2.3-beta`），預發佈不推給一般使用者
+pub fn parse_version(v: &str) -> Option<(u32, u32, u32)> {
+    let mut it = v.split('.').map(|n| {
+        (!n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())).then(|| n.parse().ok()).flatten()
+    });
+    let ver = (it.next()??, it.next()??, it.next()??);
+    it.next().is_none().then_some(ver)
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Update {
+    pub version: String,
+    /// Release 頁面（免安裝版改開這裡）
+    pub page: String,
+    pub download_url: String,
+    /// GitHub 對每個 asset 算好的 SHA-256（小寫 hex）；沒有就不自動安裝
+    pub sha256: Option<String>,
+}
+
+/// 從 GitHub `GET /repos/{owner}/{repo}/releases` 的回應挑出比 `current` 新、
+/// 而且附有安裝程式的最高版本。草稿與預發佈一律略過。
+pub fn pick_update(releases: &serde_json::Value, current: &str) -> Option<Update> {
+    let current = parse_version(current)?;
+    releases
+        .as_array()?
+        .iter()
+        .filter(|r| !r["draft"].as_bool().unwrap_or(true) && !r["prerelease"].as_bool().unwrap_or(true))
+        .filter_map(|r| {
+            let ver = parse_tag(r["tag_name"].as_str()?)?;
+            let asset = r["assets"].as_array()?.iter().find(|a| a["name"] == SETUP_ASSET)?;
+            let sha256 = asset["digest"]
+                .as_str()
+                .and_then(|d| d.strip_prefix("sha256:"))
+                .filter(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()))
+                .map(str::to_ascii_lowercase);
+            Some((ver, Update {
+                version: format!("{}.{}.{}", ver.0, ver.1, ver.2),
+                page: r["html_url"].as_str()?.to_owned(),
+                download_url: asset["browser_download_url"].as_str()?.to_owned(),
+                sha256,
+            }))
+        })
+        .filter(|(ver, _)| *ver > current)
+        .max_by_key(|(ver, _)| *ver)
+        .map(|(_, u)| u)
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -312,5 +371,66 @@ mod tests {
         for s in bad {
             assert!(parse_url(s).is_none(), "應拒絕: {s:?}");
         }
+    }
+
+    #[test]
+    fn parse_tag_accepts_only_plain_v_semver() {
+        assert_eq!(parse_tag("v0.4.0"), Some((0, 4, 0)));
+        assert_eq!(parse_tag("v10.20.30"), Some((10, 20, 30)));
+        for bad in ["legacy-v2.4.0", "0.4.0", "v0.4", "v0.4.0.1", "v0.4.0-beta", "v0.4.x", "v.4.0", "v-1.0.0", "v+1.0.0", ""] {
+            assert_eq!(parse_tag(bad), None, "應拒絕: {bad:?}");
+        }
+    }
+
+    fn release(tag: &str, draft: bool, pre: bool, asset: &str, digest: Option<&str>) -> serde_json::Value {
+        serde_json::json!({
+            "tag_name": tag,
+            "draft": draft,
+            "prerelease": pre,
+            "html_url": format!("https://github.com/YuCMochi/Pathie/releases/tag/{tag}"),
+            "assets": [{
+                "name": asset,
+                "browser_download_url": format!("https://github.com/YuCMochi/Pathie/releases/download/{tag}/{asset}"),
+                "digest": digest,
+            }],
+        })
+    }
+
+    #[test]
+    fn pick_update_takes_highest_newer_release_with_installer() {
+        let h = "A".repeat(64);
+        let digest = format!("sha256:{h}");
+        let d = Some(digest.as_str());
+        let list = serde_json::json!([
+            release("legacy-v2.4.0", false, false, SETUP_ASSET, d), // 舊系列：版本號大但不算
+            release("v0.9.0", true, false, SETUP_ASSET, d),         // 草稿
+            release("v0.8.0", false, true, SETUP_ASSET, d),         // 預發佈
+            release("v0.7.0", false, false, "Pathie.zip", d),       // 沒附安裝程式
+            release("v0.5.0", false, false, SETUP_ASSET, d),
+            release("v0.6.0", false, false, SETUP_ASSET, None),
+            release("v0.3.0", false, false, SETUP_ASSET, d),
+        ]);
+        let u = pick_update(&list, "0.3.0").unwrap();
+        assert_eq!(u.version, "0.6.0");
+        assert_eq!(u.sha256, None);
+        assert!(u.download_url.ends_with("/v0.6.0/Pathie-Setup.exe"));
+
+        let u = pick_update(&list, "0.5.9").unwrap();
+        assert_eq!(u.version, "0.6.0");
+        assert_eq!(pick_update(&list, "0.6.0"), None);
+        assert_eq!(pick_update(&list, "1.0.0"), None);
+    }
+
+    #[test]
+    fn pick_update_normalizes_digest_and_rejects_bad_ones() {
+        let up = "AB".repeat(32);
+        let ok = format!("sha256:{up}");
+        let list = serde_json::json!([release("v1.0.0", false, false, SETUP_ASSET, Some(&ok))]);
+        assert_eq!(pick_update(&list, "0.3.0").unwrap().sha256, Some("ab".repeat(32)));
+        for bad in ["sha256:abc", "md5:00", &format!("sha256:{}", "g".repeat(64))] {
+            let list = serde_json::json!([release("v1.0.0", false, false, SETUP_ASSET, Some(bad))]);
+            assert_eq!(pick_update(&list, "0.3.0").unwrap().sha256, None, "應拒絕: {bad:?}");
+        }
+        assert_eq!(pick_update(&serde_json::json!({"message": "rate limited"}), "0.3.0"), None);
     }
 }
