@@ -64,3 +64,9 @@ export const openRepository = () => invoke('open_repository');
 
 // 載入完成後通知後端（它可能此刻才顯示視窗），回傳要切到的分頁
 export const uiReady = () => invoke<string | null>('ui_ready');
+
+// 檢查更新：只在使用者按下按鈕時才連網
+export type UpdateStatus = { version: string; installable: boolean };
+export const checkUpdate = () => invoke<UpdateStatus | null>('check_update');
+// 安裝版：下載驗證後靜默安裝並重新啟動（成功時程式會直接結束）；免安裝版：開啟下載頁
+export const installUpdate = () => invoke<void>('install_update');
