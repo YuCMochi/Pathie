@@ -23,7 +23,7 @@ npm install
 npm run tauri -- build --no-bundle
 ```
 
-產物在 `src-tauri/target/release/Pathie.exe`，單一檔案即可執行。開發時可用 `npm run tauri -- dev`；啟動時加 `--settings` 會直接開啟設定視窗。
+產物在 `src-tauri/target/release/Pathie.exe`，單一檔案即可執行。開發時請用 `npm run tauri -- dev`（debug 版會連 Vite 開發伺服器，直接執行 `target/debug/Pathie.exe` 或 `cargo run` 會顯示「localhost 拒絕連線」）；啟動時加 `--settings` 會直接開啟設定視窗。
 
 打包安裝程式（需要 [Inno Setup 6](https://jrsoftware.org/isinfo.php)，先照上面建置出 exe）：
 
