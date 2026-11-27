@@ -1,11 +1,12 @@
 import { defineConfig } from 'vite';
-import { svelte } from '@sveltejs/vite-plugin-svelte';
+import react from '@vitejs/plugin-react';
+import tailwindcss from '@tailwindcss/vite';
 import { resolve } from 'node:path';
 
 // 前端放在 ui/，兩個入口：設定視窗 (index.html) 與開啟成功浮窗 (toast.html)
 export default defineConfig({
   root: 'ui',
-  plugins: [svelte()],
+  plugins: [react(), tailwindcss()],
   clearScreen: false,
   server: { port: 5173, strictPort: true },
   build: {

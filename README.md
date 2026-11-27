@@ -2,7 +2,7 @@
 
 Pathie 是一款 Windows 桌面工具，會在系統工具列常駐，監控你的剪貼簿內容，當你複製有效的檔案或資料夾路徑時，會自動幫你開啟該路徑。可在系統工具列左鍵點擊圖示快速暫停/恢復監控；右鍵選單可開啟設定視窗或退出程式。
 
-以 Rust + [Tauri 2](https://tauri.app/) 實作（設定視窗為 Svelte），不需要 .NET runtime，產出單一 exe（約 3–4 MB）。設定視窗使用系統的 Microsoft Edge WebView2 Runtime（Windows 10/11 通常已內建）。
+以 Rust + [Tauri 2](https://tauri.app/) 實作（設定視窗為 React + Tailwind + shadcn/ui），不需要 .NET runtime，產出單一 exe（約 3–4 MB）。設定視窗使用系統的 Microsoft Edge WebView2 Runtime（Windows 10/11 通常已內建）。
 
 ## 安裝與使用
 
