@@ -8,7 +8,7 @@ use std::time::Instant;
 use tauri::{AppHandle, Manager};
 use tauri_plugin_notification::NotificationExt;
 
-use crate::logic::{decide, is_unc, normalize, parse_url, rate_exceeded, Act};
+use crate::logic::{decide, is_unc, normalize, parse_url, rate_exceeded, Act, Update};
 use crate::platform::{foreground_is_browser, reveal, shell_open};
 use crate::settings::Settings;
 use crate::toast;
@@ -23,6 +23,8 @@ pub struct AppState {
     pub show_on_ready: AtomicBool,
     /// 前端載入完成後要切到的分頁
     pub initial_page: Mutex<Option<String>>,
+    /// 最近一次「檢查更新」找到的新版；按「下載並更新」時只用這份，不接受前端傳來的網址
+    pub pending_update: Mutex<Option<Update>>,
 }
 
 impl AppState {
@@ -33,6 +35,7 @@ impl AppState {
             opens: Mutex::new(VecDeque::new()),
             show_on_ready: AtomicBool::new(false),
             initial_page: Mutex::new(None),
+            pending_update: Mutex::new(None),
         }
     }
 }

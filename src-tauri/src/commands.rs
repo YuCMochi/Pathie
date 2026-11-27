@@ -10,6 +10,7 @@ use crate::logic::RATE_OPTIONS;
 use crate::platform;
 use crate::settings::{self, Settings};
 use crate::tray;
+use crate::update;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -77,4 +78,37 @@ pub fn ui_ready(app: AppHandle, state: State<AppState>) -> Option<String> {
         tray::show_settings(&app, None);
     }
     state.initial_page.lock().unwrap().take()
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateStatus {
+    version: String,
+    /// false：免安裝版或缺少檢查碼，按鈕改成開啟下載頁
+    installable: bool,
+}
+
+/// 有新版回傳版本資訊，已是最新版回傳 null
+#[tauri::command]
+pub async fn check_update(state: State<'_, AppState>) -> Result<Option<UpdateStatus>, String> {
+    let found = tauri::async_runtime::spawn_blocking(update::check).await.map_err(|e| e.to_string())??;
+    let status = found.as_ref().map(|u| UpdateStatus {
+        version: u.version.clone(),
+        installable: u.sha256.is_some() && platform::is_installed(),
+    });
+    *state.pending_update.lock().unwrap() = found;
+    Ok(status)
+}
+
+/// 安裝版：下載、驗證後執行安裝程式並結束 Pathie；免安裝版：開啟 Release 頁
+#[tauri::command]
+pub async fn install_update(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    let u = state.pending_update.lock().unwrap().clone().ok_or("請先檢查更新")?;
+    if u.sha256.is_none() || !platform::is_installed() {
+        platform::shell_open(&u.page);
+        return Ok(());
+    }
+    tauri::async_runtime::spawn_blocking(move || update::install(&u)).await.map_err(|e| e.to_string())??;
+    app.exit(0);
+    Ok(())
 }

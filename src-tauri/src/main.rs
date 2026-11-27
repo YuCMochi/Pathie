@@ -11,6 +11,7 @@ mod platform;
 mod settings;
 mod toast;
 mod tray;
+mod update;
 
 use std::sync::atomic::Ordering;
 
@@ -49,6 +50,8 @@ fn main() {
             commands::set_startup,
             commands::open_repository,
             commands::ui_ready,
+            commands::check_update,
+            commands::install_update,
         ])
         .setup(|app| {
             let args: Vec<String> = std::env::args().collect();

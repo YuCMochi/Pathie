@@ -5,14 +5,15 @@ use std::path::PathBuf;
 
 use windows::core::{w, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, LRESULT, WPARAM};
-use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+use windows::Win32::System::Com::Urlmon::URLDownloadToFileW;
+use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED, COINIT_MULTITHREADED};
 use windows::Win32::System::DataExchange::AddClipboardFormatListener;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Environment::ExpandEnvironmentStringsW;
 use windows::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION};
 use windows::Win32::UI::Shell::{ILCreateFromPathW, ILFree, PathCreateFromUrlW, SHOpenFolderAndSelectItems, ShellExecuteW};
 use windows::Win32::UI::WindowsAndMessaging::*;
-use winreg::enums::{HKEY_CURRENT_USER, KEY_SET_VALUE};
+use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_SET_VALUE};
 use winreg::RegKey;
 
 use crate::logic::{is_browser_exe, FileAction, RATE_DEFAULT, RATE_OPTIONS};
@@ -147,6 +148,42 @@ pub fn set_startup(enable: bool) {
     } else {
         let _ = key.delete_value(RUN_VALUE);
     }
+}
+
+// --- 更新 ----------------------------------------------------------------
+
+/// installer.iss 的 AppId；Inno Setup 會把安裝位置寫在 `Uninstall\{AppId}_is1`
+const UNINSTALL_KEY: &str =
+    r"Software\Microsoft\Windows\CurrentVersion\Uninstall\{B3A7C0E1-5D2F-4A68-8E19-7F4C2D9A6B05}_is1";
+
+/// 目前執行的 exe 是不是安裝程式裝的那份（不是就是免安裝版）。
+/// 安裝程式預設裝在 HKCU，以系統管理員身分安裝時會寫到 HKLM，兩邊都看。
+pub fn is_installed() -> bool {
+    let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(PathBuf::from)) else {
+        return false;
+    };
+    [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE].into_iter().any(|root| {
+        RegKey::predef(root)
+            .open_subkey(UNINSTALL_KEY)
+            .and_then(|k| k.get_value::<String, _>("InstallLocation"))
+            .is_ok_and(|loc| PathBuf::from(loc.trim_end_matches('\\')).as_os_str().eq_ignore_ascii_case(dir.as_os_str()))
+    })
+}
+
+/// 下載到指定檔案（同步，會卡住呼叫的執行緒）。用系統內建的 urlmon，省掉 HTTP 套件。
+pub fn download(url: &str, dest: &std::path::Path) -> Result<(), String> {
+    let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(Some(0)).collect() };
+    let (u, d) = (wide(url), wide(&dest.to_string_lossy()));
+    unsafe {
+        // 已初始化過（含 STA）會回錯誤，不影響下載
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        URLDownloadToFileW(None, PCWSTR(u.as_ptr()), PCWSTR(d.as_ptr()), 0, None).map_err(|e| e.message())
+    }
+}
+
+/// 啟動安裝程式（不等它結束）
+pub fn run_installer(path: &std::path::Path, args: &str) {
+    shell_execute(&path.to_string_lossy(), Some(args));
 }
 
 // --- 設定檔位置與舊版(登錄檔)設定 ---------------------------------------
