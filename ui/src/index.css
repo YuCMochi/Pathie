@@ -1,0 +1,77 @@
+@import 'tailwindcss';
+
+/* shadcn 風格的語意色票；換皮或做 Mac 風格只改這裡的變數。深色模式跟著系統。 */
+:root {
+  --background: #f3f3f3;
+  --foreground: #1b1b1b;
+  --card: #ffffff;
+  --muted: rgba(0, 0, 0, 0.06);
+  --muted-foreground: #5f5f5f;
+  --border: rgba(0, 0, 0, 0.1);
+  --primary: #0067c0;
+  --primary-foreground: #ffffff;
+  --input: #8a8a8a;
+  --warn: #fff4ce;
+  --warn-foreground: #5d4300;
+  --radius: 0.5rem;
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #202020;
+    --foreground: #ffffff;
+    --card: #2b2b2b;
+    --muted: rgba(255, 255, 255, 0.08);
+    --muted-foreground: #c5c5c5;
+    --border: rgba(255, 255, 255, 0.1);
+    --primary: #60cdff;
+    --primary-foreground: #003a5c;
+    --input: #9a9a9a;
+    --warn: #433519;
+    --warn-foreground: #fce100;
+  }
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-border: var(--border);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-input: var(--input);
+  --color-warn: var(--warn);
+  --color-warn-foreground: var(--warn-foreground);
+  --radius-lg: var(--radius);
+  --font-sans: 'Segoe UI Variable', 'Segoe UI', 'Microsoft JhengHei UI', system-ui, sans-serif;
+}
+
+@layer base {
+  html,
+  body {
+    @apply h-full bg-background font-sans text-sm text-foreground select-none;
+    margin: 0;
+  }
+  h1 {
+    @apply mb-4 text-2xl font-semibold;
+  }
+  h2 {
+    @apply mt-5 mb-2 text-sm font-semibold;
+  }
+  p {
+    @apply mb-2 leading-relaxed;
+  }
+  button {
+    cursor: pointer;
+  }
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+}
