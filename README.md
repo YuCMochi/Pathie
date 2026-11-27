@@ -33,7 +33,7 @@ ISCC /DAppVersion=<src-tauri/Cargo.toml 的版本號> installer.iss
 
 產物在 `dist/Pathie-Setup.exe`。
 
-跑測試：
+跑純後端測試：
 
 ```
 cd src-tauri

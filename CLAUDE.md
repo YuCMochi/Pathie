@@ -17,7 +17,6 @@ Rust + Tauri 2 後端，React 前端（設定視窗與開啟成功浮窗）。�
 - 前端：React 19 + TS + Tailwind v4 + shadcn 風格（Radix）、圖示用 lucide；Tailwind 尺寸是 rem，
   不要把 `html` 字級改掉（曾因此讓開關歪掉）
 - 設定欄位新增要同步：`settings.rs`、`ui/src/lib/store.ts` 的 `Settings` 型別、對應分頁
-- 不做失敗提示（太吵），只有開啟成功浮窗與頻率上限/重複啟動的系統通知
 - 版本號在 `src-tauri/Cargo.toml`（與 Cargo.lock），升版 chore 直接在 main
 
 ## 指令
