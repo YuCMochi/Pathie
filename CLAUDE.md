@@ -7,6 +7,8 @@ Rust + Tauri 2 後端，React 前端（設定視窗與開啟成功浮窗）。�
 - `src-tauri/src/logic.rs`：純邏輯（解析路徑/網址、安全判斷、頻率上限），不碰 Win32，含多數測試
 - `src-tauri/src/platform.rs`：Win32 層（剪貼簿監聽、ShellExecute、開機啟動、舊登錄檔設定）；日後 Mac 版換這層
 - `src-tauri/src/settings.rs`：`%APPDATA%\Pathie\settings.json` 讀寫；無 JSON 時從登錄檔 `HKCU\Software\Pathie` 搬一次
+- `src-tauri/src/update.rs`：「關於」頁的檢查更新／一鍵更新（GitHub Releases → 驗證 SHA-256 → `Pathie-Setup.exe /VERYSILENT /UPDATE`）；
+  啟動時不檢查、不通知
 - `src-tauri/src/app.rs`：共用狀態與 `handle_clipboard` / `act_on`
 - `src-tauri/src/tray.rs`、`toast.rs`、`commands.rs`、`main.rs`：系統匣、浮窗、前端 IPC、啟動流程
 - `ui/src/`：`App.tsx` 設定視窗、`toast.tsx` 浮窗、`pages/` 各分頁、`components/ui/` shadcn 風格元件、

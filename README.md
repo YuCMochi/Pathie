@@ -33,6 +33,8 @@ ISCC /DAppVersion=<src-tauri/Cargo.toml 的版本號> installer.iss
 
 產物在 `dist/Pathie-Setup.exe`。
 
+發版：在 GitHub 建立 Release，tag 用 `v<版本號>`（例如 `v0.4.0`，不要標成 pre-release），附上 `Pathie-Setup.exe`（檔名不要改）。設定視窗「關於」頁的「檢查更新」只認這種 Release，會用 GitHub 提供的 SHA-256 驗證後靜默安裝；免安裝版則改為開啟下載頁。
+
 跑純後端測試：
 
 ```
