@@ -50,7 +50,10 @@
 }
 
 @layer base {
-  html,
+  /* 字級只設在 body；html 要維持 16px，否則所有 rem 尺寸都會縮水 */
+  html {
+    @apply h-full;
+  }
   body {
     @apply h-full bg-background font-sans text-sm text-foreground select-none;
     margin: 0;
